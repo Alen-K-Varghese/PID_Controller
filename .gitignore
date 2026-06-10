@@ -3,3 +3,5 @@
 
 # Ignore JSON files
 *.json
+*.vscode
+

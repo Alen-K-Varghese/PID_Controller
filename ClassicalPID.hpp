@@ -1,3 +1,17 @@
+// The main PID Controller and performance Monitor.
+// A basic (Integer Order) PID Controller is implemented here. Has provisions for noise filtering, Setpoint weighting, integral windup protection etc.
+// The Controller also encompasses the usual PID Controller with some modifications. Refer [1] for more details on each feature. The controller is configured
+// using a Struct PID_Config. As for the theory of the classical PID Controller, the proportional, integral and derivative term encapsulate the
+//  present, past and future respectively. The basic control law is given by:
+//          $u(t) = K(e[n] + td * de[n]/dt + (1/ts)*Integral(e[n]) )$
+// In this implementation the derivative term has a filter and integral term has a back-calculation based Windup Protection. Filetrs help to eliminate noise,
+// while windup protection is for dealing with the phenomenon on integral windup, due to actuator saturation. This causes a groggy and laggy controller. 
+// Back-calculation can get unstable if sqrt(ki/kd) << 1. It can cause negative control signals for positive errors. Generally Kd << Ki or Kp. Derivative 
+// term is sensitive to noise and integral back-calculation is sensitive to value of Kd. Either of this ought to be prevented for good performance.
+//
+// The performance monitor is another aspect of this. It can be Configured is Config Struct. 
+//
+// More specifics on working is present at each part seperately.
 #ifndef PID_CONTROLLER_H
 #define PID_CONTROLLER_H
 
@@ -6,8 +20,54 @@
 #include <cassert>
 #include <algorithm>
 #include <vector>
+#include<optional>
+#include<list>
+#include <stdexcept>
 
 constexpr double g_pi = 3.1416;
+
+class Logger
+{
+private:
+    std::list<double> error_signal;
+    std::list<double> reference_signal;
+    std::list<double> control_signal;
+
+    std::list<double> proportional_term;
+    std::list<double> integral_term;
+    std::list<double> derivative_term;
+
+public:
+
+    Logger(const int& iter)
+    :
+    error_signal(iter),
+    reference_signal(iter),
+    control_signal(iter),
+    proportional_term(iter),
+    integral_term(iter),
+    derivative_term(iter)
+    {}
+
+    void log_data(
+        double reference,
+        double error,
+        double control,
+        double p_term,
+        double i_term,
+        double d_term)
+        {
+            reference_signal.push_back(reference);
+            error_signal.push_back(error);
+            control_signal.push_back(control);
+
+            proportional_term.push_back(p_term);
+            integral_term.push_back(i_term);
+            derivative_term.push_back(d_term);
+        }
+};
+
+
 
 // PerformanceMonitor analyses the real time stability and performance of the PID controller including 
 // ** The quality of gains and saturation times, presence of oscillations and instability in the system.
@@ -18,6 +78,7 @@ class PerformanceMonitor
 private:
 
     /* ==== Common variables ==== */
+    double error= 0.0;
 
     unsigned int m_count_call = 0; // Count of Controller calls
 
@@ -35,7 +96,9 @@ private:
 
     double m_omega_ult; // Ultimate Frequency
     double m_gamma = 0.45; // Memory weightage for load history
-    double m_load_mem = 0.0; // Memory term for load history
+
+    double m_load_memory = 0.0; // Memory term for load history
+    double m_zeroCrossing_memory = 0.0; //Memory term for Zero Crossing history 
 
     double m_iae = 0.0; // The value of Integral Absolute Error (IAE) in the gap between subsequent zero crossings of error signal.
     double m_iae_limit = 0.0; // Limit on Integral absolute error for detecting load disturbance.
@@ -44,7 +107,7 @@ private:
     double m_oscillation_limit = 10.0; // Limit of number of oscillations detected
 
     bool f_oscillation_detected = false; // Flag for detecting presence of oscillation
-    bool f_oscillation_sustained = false; // Flag to see if oscillation is sustaied
+    
 
     // time of Zero Crossing of error signal
     unsigned int  m_prev_zero_crossing[2] = {0,0}, m_count_zero_crossing = 0.0;
@@ -52,94 +115,26 @@ private:
     // Peak vales of error in previous and current oscillation cycle
     double m_prev_error_max = 0.0, m_error_max = 0.0;
 
-    // Min Rate of decrease of errorMax of oscillations to ascertain decaying. 
-    // If rate is below m_eps, its taken to be presence of sustained oscillation.
-    double m_eps = 0.3f;
+    // Band Threshold for distinguishing noise and actual zerocorssings
+    double m_noise_threshold = 0.05;
 
-    unsigned short int m_load = 0;
-    
-    // Function to monitor oscillations and load disturbances in the system. 
-    //
-    // It detects zero crossings in the error signal and monitors the change in amplitude of 
-    // error signal peak. It flags oscillations as sustained if subsequent peaks of error signal 
-    // do not show sufficent deacy (approx 30%).
-    // 
-    // Depending on the ultimate frequency, if number of oscillations exceeds a limit, it warns
-    // the user about presence of sustained oscillations and suggests retuning.
-    //
-    // Moreover, in the gap between suqsequnt zero crossings, the Integral Absolute Error (IAE) 
-    // is measured and  if it exceeds iae_limit, its taken to be presence of load disturbance in the 
-    // system. Choice of iae_limit is a tradeoff between accuracy of detection and false positives, 
-    // and is best set based on the expected load disturbances in the system. 
-    //
-    // During the event of a setpoint change(>30% of current setpoint), the values are reset 
-    // to avoid false positives.
-    // 
-    // Certain constants like omega_u (ultimate frequency) are estimated using parameters of corrosponding 
-    // PidController Object. So highly imporper tuning can generate erratic results. Hence such parameters 
-    // are flagged and error is thrown. 
-    void monitor_Oscillation(const double error)
-    {
-        // Load Detection
-        if (error*prev_error < 0.0)
-        {
-            m_load = (m_iae > m_iae_limit) ? 1 : 0;
-
-            m_iae = std::fabs(error)*m_time_step;
-            
-            if(m_prev_error_max > 0.0)
-            {
-                f_oscillation_sustained = (std::fabs((m_error_max - m_prev_error_max)/m_prev_error_max) > m_eps);
-            }
-            else{}
-
-        }
-        else m_error_max = std::max(prev_error, error);
-
-        // Oscillation detection
-        m_load_mem = m_gamma*m_load_mem + m_load;
-        if (m_load_mem > 10.0){}
-    }
+    bool m_load = 0;
 
     /* ==== Variables for Saturation ==== */
 
     double m_u_max = 1.0e6;        
     double m_u_min = -1.0e6; 
 
-    // Function monitoring saturation of controller output. 
-    // If it exceeds 5% in upper of loweer bound, its warns user.
-    // Only starts monitoring after 20-30 of operation to 
-    // avoid false positives during setpoint changes and initial transients.
-    void monitor_saturation(const double controlSignal)
-    {
-        if (controlSignal >= m_u_max){++m_count_upperSat;}
-        if (controlSignal <= m_u_min){++m_count_lowerSat;}
-
-        if (m_count_call > 1/m_time_step)
-        {
-            if (m_count_lowerSat/m_count_call >= 5)
-            {std::cout<<"Saturation of controller exceeds 5\% at lower bound";}
-
-            if (m_count_upperSat/m_count_call >= 5)
-            {std::cout<<"Saturation of controller exceeds 5\% at upper bound";}
-        }
-    }
-    
-    void monitor_gainQuality(void){}
-
-
-    void estimate_Kp(void){}
-
 public:
 
     PerformanceMonitor(
-        const double time_step,
-        const double kp,
-        const double ki,
-        const double kd,
-        const double u_max,
-        const double u_min,
-        const double filter_coeff)
+        const double& time_step,
+        const double& kp,
+        const double& ki,
+        const double& kd,
+        const double& u_max,
+        const double& u_min,
+        const double& filter_coeff)
     {
         m_time_step = time_step;
 
@@ -149,9 +144,9 @@ public:
     }
 
     void setGains(
-        const double kp, 
-        const double ki, 
-        const double kd)
+        const double& kp, 
+        const double& ki, 
+        const double& kd)
         {
             assert(kp > 0.0);
             k = kp;
@@ -172,20 +167,77 @@ public:
         }
 
     void setActuatorLimits(
-        const double u_min, 
-        const double u_max) //:m_u_min(u_min), m_u_max(u_max)
+        const double& u_min, 
+        const double& u_max) //:m_u_min(u_min), m_u_max(u_max)
         {}
 
 
     void Monitor(
-        const double& error,
+        const double& reference,
+        const double& state,
         const double& control_signal)
     {
+        error = reference - state;
         ++m_count_call;
-        
-        monitor_saturation(control_signal);
-        monitor_Oscillation(error);
 
+        /* Detection of Actuator Saturation */
+        // Function monitoring saturation of controller output. 
+        // If it exceeds 5% in upper of loweer bound, its warns user.
+        // Only starts monitoring after 20-30 of operation to 
+        // avoid false positives during setpoint changes and initial transients.
+        m_count_lowerSat += (control_signal <= m_u_min);
+        m_count_upperSat += (control_signal >= m_u_max);
+
+
+        /*Detection of Zero Crossings and Load */
+        // It detects zero crossings in the error signal and monitors the change in amplitude of 
+        // error signal peak. It flags oscillations as sustained if subsequent peaks of error signal 
+        // do not show sufficent deacy.
+        // 
+        // Depending on the ultimate frequency, if number of oscillations exceeds a limit, it warns
+        // about presence of sustained oscillations and suggests retuning.
+        //
+        // Moreover, in the gap between subsequent zero crossings, the Integral Absolute Error (IAE) 
+        // is measured and  if it exceeds iae_limit, its taken to be presence of load disturbance in the 
+        // system. Choice of iae_limit is a tradeoff between accuracy of detection and false positives, 
+        // and is best set based on the expected load disturbances in the system. 
+        //
+        // During the event of a setpoint change, certain values are reset to avoid false positives.
+        // 
+        // Certain constants like omega_u (ultimate frequency) are estimated using parameters of corrosponding 
+        // PidController. So highly imporper tuning can generate erratic results. Hence such parameters 
+        // are flagged and error is thrown.
+        if (error*prev_error < 0.0 and std::fabs(error) > m_noise_threshold)
+        {
+            m_zeroCrossing_memory = m_gamma*0.2*m_zeroCrossing_memory + 1;
+            if (m_zeroCrossing_memory > 10.0)
+            {
+                m_zeroCrossing_memory = 0.0;
+                throw std::runtime_error("Too many Zero Crossings Detected");
+            }
+
+            m_load = (m_iae > m_iae_limit);
+            m_iae = std::fabs(error)*m_time_step;
+
+            m_error_max = error;
+
+        }  
+        else
+        {
+            m_error_max = std::max(std::fabs(error), std::fabs(prev_error));
+        }
+        
+        /* Oscillation detection*/
+        // Oscillations are said to be present if,for some supervision time, T_sup, the numbers of detectiosn exceed limit*T_ult/2, for every half period.
+        // Generally, this implies that load had been detected (IAE > IAE_Limit) for ~10 times in given supervision time. This would prectically require 
+        // all values in T_sup to be stored in. Instead a weighted memory term is used for this. Refer [2] 
+        m_load_memory = m_gamma*m_load_memory + m_load;
+        if(m_load_memory > 10.0)
+        {
+            f_oscillation_detected = true;
+            m_load_memory = 0.0;
+            throw std::runtime_error("Load Oscillations Detected");
+        }
     }
 };
 
@@ -215,9 +267,10 @@ struct PIDConfig
     double sp_weight = 1.0;
     double filter_const = 10.0;
 
+    int iterations = 500;
+
     bool allow_windup_protection = true;
     bool allow_filter = true;
-    bool f_enable_logging = false;
     bool f_enable_monitoring = false;
 };
 
@@ -235,6 +288,8 @@ private:
 
     // Internal Flag
     bool f_sp_weight = false, f_deriv = false, f_intgr = false;
+
+    std::optional<Logger> PID_Log;
 
     void validateConfig()
     {
@@ -266,7 +321,7 @@ public:
     
     // sets gains of the controller and updates internal variables accordingly.
     //
-    // Internally these are converted to k, ti, td and tt(windup protection time constant = sqrt(ti*td) if td !=0 else tt = ti).
+    // Internally these are converted to k, ti, td and tt.
     //
     // @param kp : Proportional Gain
     // @param ki : Integral Gain
@@ -306,14 +361,15 @@ public:
         m_prev_state = 0.0;
         m_prev_control_signal = 0.0;
         m_prev_error = 0.0;
-
+        PID_Log.emplace(s_cfg.iterations);
     }
 
     // Function to compute control signal for given setpoint and state. 
     //
     //Setpoint and state are required explicitly required to accomodate setpoint changes and setpoint weighting.
     //
-    // The function also updates internal variables for next call and logs data if enabled in config struct.
+    // The function also updates internal variables for next call and logs data. It also performs performance analysis using 
+    // PerformancMonitor if enabled.
     //
     // @param setpoint : Desired value of the variable being controlled
     // @param state : Current value of the variable being controlled
@@ -362,10 +418,16 @@ public:
                 m_iTerm += (h/tt)*error_sat;
                 }
         }
-
+        // Unsaturated control signal
         m_control_signal = m_pTerm + m_iTerm + m_dTerm;
+
+        // Logging data
+        PID_Log.value().log_data(setpoint, error, m_control_signal, m_pTerm, m_iTerm, m_dTerm);
+
+        // Monitoring of controller performance
         if (s_cfg.f_enable_monitoring){}
 
+        // Actual, Saturated control signal
         m_control_signal = std::clamp(m_control_signal, s_cfg.u_min, s_cfg.u_max);
 
         

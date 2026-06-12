@@ -78,76 +78,63 @@ class PerformanceMonitor
 private:
 
     /* ==== Common variables ==== */
-    double m_initial_state = 0.0;
-    double m_initial_time = 0.0;
+    double time_step;  // Time Step of Controller (from config struct)
 
-    double m_error= 0.0;
-    double m_steadyStateError = 0.0;
+    double initial_state;
+    double initial_time = 0.0;
 
-    unsigned int m_count_call = 0; // Count of Controller calls
-
-    double m_time_step = 0.0;  // Time Step of Controller (from config struct)
-    double time = 0.0;  // Time (Call Count * time Step)
-
+    double error= 0.0;    // Current Error Value
+    double steadyStateError = 0.0; 
     double prev_error = 0.0;
+
     double prev_setpoint = 0.0;
+
+    unsigned int count_call = 0; // Count of Controller calls
 
     double k, td, ti, tt; // Controller gain
 
-    unsigned int m_count_upperSat = 0; // Count of instants of saturation at u_max
-    unsigned int m_count_lowerSat = 0; // Count of instants of saturation at u_min
+    std::vector<double> rise_time_arr; // time for state to rise from 10% of setpoint ro 90% of setpoiny
 
-    /*==== Basic Parameters ====*/
-    double prev_setpoint = 0.0;
-    double setpoint_threshold = 0.05;
-
-    std::vector<double> rise_time;
-
-    double rise_time_y10 = {0.0};
+    double rise_time_y10 = 0.0; // Time when state reaches 10% of setpoint. Must be stored until rise time is calculated.
     bool y10_recorded = false;
 
-    double rise_time_y90 = {0.0};
     bool y90_recorded = false;
 
-    double m_peak_value = 0.0;
-    std::vector<double> peak_value = {0.0};
-    double m_peak_value_memory = 0.0;
+    double peak_value = 0.0;
+    std::vector<double> peak_value_arr;
     bool peakValue_recorded = false;
 
     
     /* ==== Variables for Oscillation and Load Detection ==== */
 
-    double m_omega_ult; // Ultimate Frequency
-    double m_gamma = 0.45; // Memory weightage for load history
+    double omega_ult; // Ultimate Frequency
+    double gamma = 0.45; // Memory weightage for load history
 
-    double m_load_memory = 0.0; // Memory term for load history
-    double m_zeroCrossing_memory = 0.0; //Memory term for Zero Crossing history 
+    double load_memory = 0.0; // Memory term for load history
 
-    double m_iae = 0.0; // The value of Integral Absolute Error (IAE) in the gap between subsequent zero crossings of error signal.
-    double m_iae_limit = 0.0; // Limit on Integral absolute error for detecting load disturbance.
+    double iae = 0.0; // The value of Integral Absolute Error (IAE) in the gap between subsequent zero crossings of error signal.
+    double iae_limit = 0.0; // Limit on Integral absolute error for detecting load disturbance.
 
-    double m_oscillation_amplitude = 1.0; // Amplitude of oscillation of controller
-    double m_oscillation_limit = 10.0; // Limit of number of oscillations detected
+    double oscillation_amplitude = 1.0; // Amplitude of oscillation of controller
+    double oscillation_limit = 10.0; // Limit of number of oscillations detected
 
-    bool oscillation_detected = false; // Flag for detecting presence of oscillation
-    
-    double divergence_count_memory = 0;
 
     // time of Zero Crossing of error signal
-    unsigned int  m_prev_zero_crossing[2] = {0,0}, m_count_zero_crossing = 0.0;
+    double prev_zero_crossing = 0.0;
 
     // Peak vales of error in previous and current oscillation cycle
-    double m_prev_error_max = 0.0, m_error_max = 0.0;
+    double prev_error_max = 0.0, m_error_max = 0.0;
 
-    // Band Threshold for distinguishing noise and actual zerocorssings
-    double m_noise_threshold = 0.05;
+    // Band Threshold for distinguishing noise and actual zerocorssings (in percent)
+    double noise_threshold = 0.05;
 
-    bool m_load = 0;
+    bool load = 0;
 
     /* ==== Variables for Saturation ==== */
 
-    double m_u_max = 1.0e6;        
-    double m_u_min = -1.0e6; 
+    double u_maxValue = 1.0e6;        
+    double u_minValue = -1.0e6;
+    unsigned int count_saturation = 0; // Count of instants of saturation at u_max
 
 public:
 
@@ -162,15 +149,12 @@ public:
         const double& u_min,
         const double& filter_coeff)
     :
-    m_time_step(time_step),
-    m_initial_state(initial_state),
-    m_initial_time(initial_time)
+    time_step(time_step),
+    initial_state(initial_state),
+    initial_time(initial_time)
     {
-        m_time_step = time_step;
-
         setGains(kp, ki, kd);
         setActuatorLimits(u_min, u_max);
-
     }
 
     void setGains(
@@ -184,9 +168,9 @@ public:
             assert(ki > 0.0);
             ti = k/ki;
 
-            m_gamma = 1.0 - (50*ti)/m_time_step;
-            m_omega_ult = (2.0*g_pi)/ti;
-            m_iae_limit = (2.0*m_oscillation_amplitude)/m_omega_ult;
+            gamma = 1.0 - (50*ti)/time_step;
+            omega_ult = (2.0*g_pi)/ti;
+            iae_limit = (2.0*oscillation_amplitude)/omega_ult;
 
             tt = ti;
             if (kd > 0.0)
@@ -198,8 +182,11 @@ public:
 
     void setActuatorLimits(
         const double& u_min, 
-        const double& u_max) //:m_u_min(u_min), m_u_max(u_max)
-        {}
+        const double& u_max)
+        {
+            u_maxValue = u_max;
+            u_minValue = u_min;
+        }
 
 
     void Monitor(
@@ -207,14 +194,20 @@ public:
         const double& state,
         const double& control_signal)
     {
-        m_error = setpoint - state;
-        ++m_count_call;
-        /*Basic Params: rise time, prak time etc..*/
+        error = setpoint - state;
+        ++count_call;
 
+        /*Basic Params: rise time, prak time etc..*/
         double delta_setpoint = std::fabs(setpoint - prev_setpoint);
 
-        if (delta_setpoint/std::fabs(prev_setpoint) > setpoint_threshold)
+        // Change in setpoint must be atlest 5%
+        if (delta_setpoint/std::fabs(prev_setpoint) > 0.05 and prev_setpoint > 0.0)
         {
+            if(!y10_recorded or !y90_recorded)
+            {
+                rise_time_arr.push_back(0);
+                peak_value_arr.push_back(0);
+            }
             y10_recorded = false;
             y90_recorded = false;
             peakValue_recorded = false;
@@ -223,23 +216,18 @@ public:
         if(state >= 0.1*setpoint and !y10_recorded)
         {
             y10_recorded = true;
-            rise_time_y10 = m_initial_time + m_count_call*m_time_step;
+            rise_time_y10 = initial_time + count_call*time_step;
         }
         if(state >= 0.9*setpoint and !y90_recorded)
         {
             y90_recorded = true;
-            rise_time_y90 = m_initial_time + m_count_call*m_time_step;
-
-            rise_time.push_back(rise_time_y90 - rise_time_y10);
+            rise_time_arr.push_back(initial_time + count_call*time_step - rise_time_y10);
         }
 
         if(!peakValue_recorded)
         {
-            m_peak_value = std::max(m_peak_value, state);
-            m_peak_value_memory = m_gamma*0.5*m_peak_value_memory + 1;
+            peak_value = std::max(peak_value, state);
 
-            peakValue_recorded = (m_peak_value_memory > 10.0);
-            m_steadyStateError = (m_peak_value_memory > 10.0)*m_error;
         }
 
         /* Detection of Actuator Saturation */
@@ -247,8 +235,12 @@ public:
         // If it exceeds 5% in upper of loweer bound, its warns user.
         // Only starts monitoring after 20-30 of operation to 
         // avoid false positives during setpoint changes and initial transients.
-        m_count_lowerSat += (control_signal <= m_u_min);
-        m_count_upperSat += (control_signal >= m_u_max);
+        count_saturation += (control_signal <= u_minValue) or (control_signal >= u_maxValue);
+
+        if ((count_call > 1.0/time_step) and (count_saturation > 0.075*count_call))
+        {   
+            std::cerr<<"\n Warning! Saturation Detected \n "<<std::endl;   
+        }
 
 
         /*Detection of Zero Crossings and Load */
@@ -269,57 +261,58 @@ public:
         // Certain constants like omega_u (ultimate frequency) are estimated using parameters of corrosponding 
         // PidController. So highly imporper tuning can generate erratic results. Hence such parameters 
         // are flagged and error is thrown.
-        if (m_error*prev_error < 0.0 and std::fabs(m_error) > m_noise_threshold)
+        if (error*prev_error < 0.0 and std::fabs(error) > noise_threshold)
         {
-            m_zeroCrossing_memory = m_gamma*0.2*m_zeroCrossing_memory + 1;
-            if (m_zeroCrossing_memory > 10.0)
-            {
-                m_zeroCrossing_memory = 0.0;
-                std::cerr<<"Warning! Zero Crossings Detected";
-
-                double delta_error = m_prev_error_max - m_error_max;
-
-                divergence_count_memory = m_gamma*divergence_count_memory*(1.0/delta_error/m_prev_error_max) + (delta_error/m_prev_error_max > 0.0);
-                if (divergence_count_memory > 10.0)
-                {
-                    throw std::runtime_error("Controller is diverging. Session Terminated!");
-                }
-            }
-
-            m_load = (m_iae > m_iae_limit);
-            if(m_load){std::cerr<<"Warning! Load Detected";}
+            load = (iae > iae_limit);
+            if(load){std::cerr<<"Warning! Load Detected";}
             
             // resetting IAE for new supposed load cycle
-            m_iae = std::fabs(m_error)*m_time_step;
+            iae = std::fabs(error)*time_step;
 
             // resetting error max for new supposed load cycle
-            m_error_max = std::fabs(m_error);
+            m_error_max = std::fabs(error);
 
         }  
         else
         {
-            m_iae += std::fabs(m_error)*m_time_step;
-            m_load = 0;
+            iae += std::fabs(error)*time_step;
+            load = 0;
 
-            m_error_max = std::max(std::fabs(m_error), std::fabs(prev_error));
+            m_error_max = std::max(std::fabs(error), std::fabs(prev_error));
         }
         
         /* Oscillation detection*/
         // Oscillations are said to be present if,for some supervision time, T_sup, the numbers of detectiosn exceed limit*T_ult/2, for every half period.
         // Generally, this implies that load had been detected (IAE > IAE_Limit) for ~10 times in given supervision time. This would prectically require 
         // all values in T_sup to be stored in. Instead a weighted memory term is used for this. Refer [2] 
-        m_load_memory = m_gamma*m_load_memory + m_load;
-        if(m_load_memory > 10.0)
+        load_memory = gamma*load_memory + load;
+        if(load_memory > 5.0)
         {
-            oscillation_detected = true;
-            m_load_memory = 0.0;
-            std::cerr<<"Warning! Oscillations Detected";
-            
-            if (m_load_memory > 15.0){
+            if (load_memory > 15.0)
+            {
                 throw std::runtime_error("Too many oscillations detected. Session Terminated!");
             }
+
+            load_memory = 0.0;
+            std::cerr<<"Warning! Oscillations Detected";
         }
     }
+
+    void ShowResults(void)
+    {
+        std::cout<<"======================================================="<<std::endl;
+        std::cout<<"\t \t Performance Analysis"<< std::endl;
+        std::cout<<"======================================================="<<std::endl;
+
+        for(int i = 0; i <= rise_time_arr.size(); ++i)
+        {
+            std::cout<<"Setpoint change  #"<<i+1<<std::endl;
+            std::cout<<"Rise Time:       "<<rise_time_arr.at(i)<<" sec"<<std::endl;
+            std::cout<<"Peak Value:      "<<peak_value<<std::endl;
+        }
+    }
+
+
 };
 
 
@@ -362,21 +355,22 @@ private:
 
     /*Internal variable for values of Current call;
      stores values from previous call at the beginning of call*/
-    double m_pTerm = 0.0, m_iTerm = 0.0, m_dTerm = 0.0;
+    double proportional_term = 0.0, integral_term = 0.0, derivative_term = 0.0;
 
     /*Variable storing inputs and outputs from previous iteration  */
-    double m_prev_state = 0.0, m_prev_control_signal = 0.0, m_prev_error = 0.0;
+    double prev_state = 0.0, prev_control_signal = 0.0, prev_error = 0.0;
 
     // Internal Flag
     bool f_sp_weight = false, f_deriv = false, f_intgr = false;
 
     std::optional<Logger> PID_Log;
+    std::optional<PerformanceMonitor> PID_Monitor;
 
     void validateConfig()
     {
         assert(s_cfg.time_step > 0.0);
         assert(s_cfg.u_max - s_cfg.u_min > 0.0);
-        assert(s_cfg.sp_weight>0.0 && s_cfg.sp_weight < 1.0);
+        assert(s_cfg.sp_weight>0.0 && s_cfg.sp_weight <= 1.0);
         f_sp_weight = true;
 
     };
@@ -390,7 +384,7 @@ public:
 
     PIDConfig s_cfg;
 
-    double m_control_signal = 0.0;
+    double control_signal = 0.0;
 
     PidController(
         const PIDConfig& config)
@@ -432,17 +426,37 @@ public:
         }
     }
 
-    void begin(void)
+    void begin(
+        double initial_state,
+        double initial_time)
     {
         // Reset Terms
-        m_pTerm = 0.0;
-        m_iTerm = 0.0;
-        m_dTerm = 0.0;
+        proportional_term = 0.0;
+        integral_term = 0.0;
+        derivative_term = 0.0;
 
-        m_prev_state = 0.0;
-        m_prev_control_signal = 0.0;
-        m_prev_error = 0.0;
+        prev_state = 0.0;
+        prev_control_signal = 0.0;
+        prev_error = 0.0;
+
+
         PID_Log.emplace(s_cfg.iterations);
+        PID_Monitor.emplace(
+            s_cfg.time_step,
+            initial_state,
+            initial_time,
+            s_cfg.kp,
+            s_cfg.ki,
+            s_cfg.kd,
+            s_cfg.u_max,
+            s_cfg.u_min,
+            s_cfg.filter_const
+        );
+    }
+
+    void end(void)
+    {
+        PID_Monitor.value().ShowResults();
     }
 
     // Function to compute control signal for given setpoint and state. 
@@ -469,7 +483,7 @@ public:
         if (f_sp_weight){error_pTerm = s_cfg.sp_weight*setpoint - state;}
 
         /*Proportional Term*/
-        m_pTerm = k*error_pTerm;
+        proportional_term = k*error_pTerm;
 
         /*Derivative Term*/
         if (f_deriv)
@@ -483,40 +497,47 @@ public:
                 a1 = (2*td - N*h)/(2*td + N*h);
                 a2 = -(2*k*td*N)/(2*td + N*h);
             }
-            m_dTerm = a1*m_dTerm + a2*(state - m_prev_state);
+            derivative_term = a1*derivative_term + a2*(state - prev_state);
         }
         
         /*Integral Term*/
         if (f_intgr)
         {   
-            m_iTerm = m_iTerm + (k*h*0.5/ti)*(error + m_prev_error);
+            integral_term = integral_term + (k*h*0.5/ti)*(error + prev_error);
             if (s_cfg.allow_windup_protection)
             {
-                const double u_pred = m_pTerm + m_iTerm + m_dTerm;
+                const double u_pred = proportional_term + integral_term + derivative_term;
 
                 /*Saturation of predicted output*/
                 const double error_sat = std::clamp(u_pred, s_cfg.u_min, s_cfg.u_max) - u_pred;
-                m_iTerm += (h/tt)*error_sat;
+                integral_term += (h/tt)*error_sat;
                 }
         }
         // Unsaturated control signal
-        m_control_signal = m_pTerm + m_iTerm + m_dTerm;
+        control_signal = proportional_term + integral_term + derivative_term;
 
         // Logging data
-        PID_Log.value().log_data(setpoint, error, m_control_signal, m_pTerm, m_iTerm, m_dTerm);
+        PID_Log.value().log_data(setpoint, error, control_signal, proportional_term, integral_term, derivative_term);
 
         // Monitoring of controller performance
-        if (s_cfg.f_enable_monitoring){}
+        if (s_cfg.f_enable_monitoring)
+        {
+            PID_Monitor.value().Monitor(
+                setpoint,
+                state,
+                control_signal
+            );
+        }
 
         // Actual, Saturated control signal
-        m_control_signal = std::clamp(m_control_signal, s_cfg.u_min, s_cfg.u_max);
+        control_signal = std::clamp(control_signal, s_cfg.u_min, s_cfg.u_max);
 
         
-        m_prev_state = state;
-        m_prev_error = error;
-        m_prev_control_signal = m_control_signal;
+        prev_state = state;
+        prev_error = error;
+        prev_control_signal = control_signal;
 
-        return m_control_signal;
+        return control_signal;
     }    
 };
 

@@ -78,18 +78,41 @@ class PerformanceMonitor
 private:
 
     /* ==== Common variables ==== */
-    double error= 0.0;
+    double m_initial_state = 0.0;
+    double m_initial_time = 0.0;
+
+    double m_error= 0.0;
+    double m_steadyStateError = 0.0;
 
     unsigned int m_count_call = 0; // Count of Controller calls
 
     double m_time_step = 0.0;  // Time Step of Controller (from config struct)
     double time = 0.0;  // Time (Call Count * time Step)
+
     double prev_error = 0.0;
+    double prev_setpoint = 0.0;
 
     double k, td, ti, tt; // Controller gain
 
     unsigned int m_count_upperSat = 0; // Count of instants of saturation at u_max
     unsigned int m_count_lowerSat = 0; // Count of instants of saturation at u_min
+
+    /*==== Basic Parameters ====*/
+    double prev_setpoint = 0.0;
+    double setpoint_threshold = 0.05;
+
+    std::vector<double> rise_time;
+
+    double rise_time_y10 = {0.0};
+    bool y10_recorded = false;
+
+    double rise_time_y90 = {0.0};
+    bool y90_recorded = false;
+
+    double m_peak_value = 0.0;
+    std::vector<double> peak_value = {0.0};
+    double m_peak_value_memory = 0.0;
+    bool peakValue_recorded = false;
 
     
     /* ==== Variables for Oscillation and Load Detection ==== */
@@ -106,8 +129,9 @@ private:
     double m_oscillation_amplitude = 1.0; // Amplitude of oscillation of controller
     double m_oscillation_limit = 10.0; // Limit of number of oscillations detected
 
-    bool f_oscillation_detected = false; // Flag for detecting presence of oscillation
+    bool oscillation_detected = false; // Flag for detecting presence of oscillation
     
+    double divergence_count_memory = 0;
 
     // time of Zero Crossing of error signal
     unsigned int  m_prev_zero_crossing[2] = {0,0}, m_count_zero_crossing = 0.0;
@@ -129,12 +153,18 @@ public:
 
     PerformanceMonitor(
         const double& time_step,
+        const double& initial_state,
+        const double& initial_time,
         const double& kp,
         const double& ki,
         const double& kd,
         const double& u_max,
         const double& u_min,
         const double& filter_coeff)
+    :
+    m_time_step(time_step),
+    m_initial_state(initial_state),
+    m_initial_time(initial_time)
     {
         m_time_step = time_step;
 
@@ -173,12 +203,44 @@ public:
 
 
     void Monitor(
-        const double& reference,
+        const double& setpoint,
         const double& state,
         const double& control_signal)
     {
-        error = reference - state;
+        m_error = setpoint - state;
         ++m_count_call;
+        /*Basic Params: rise time, prak time etc..*/
+
+        double delta_setpoint = std::fabs(setpoint - prev_setpoint);
+
+        if (delta_setpoint/std::fabs(prev_setpoint) > setpoint_threshold)
+        {
+            y10_recorded = false;
+            y90_recorded = false;
+            peakValue_recorded = false;
+        }
+
+        if(state >= 0.1*setpoint and !y10_recorded)
+        {
+            y10_recorded = true;
+            rise_time_y10 = m_initial_time + m_count_call*m_time_step;
+        }
+        if(state >= 0.9*setpoint and !y90_recorded)
+        {
+            y90_recorded = true;
+            rise_time_y90 = m_initial_time + m_count_call*m_time_step;
+
+            rise_time.push_back(rise_time_y90 - rise_time_y10);
+        }
+
+        if(!peakValue_recorded)
+        {
+            m_peak_value = std::max(m_peak_value, state);
+            m_peak_value_memory = m_gamma*0.5*m_peak_value_memory + 1;
+
+            peakValue_recorded = (m_peak_value_memory > 10.0);
+            m_steadyStateError = (m_peak_value_memory > 10.0)*m_error;
+        }
 
         /* Detection of Actuator Saturation */
         // Function monitoring saturation of controller output. 
@@ -207,24 +269,39 @@ public:
         // Certain constants like omega_u (ultimate frequency) are estimated using parameters of corrosponding 
         // PidController. So highly imporper tuning can generate erratic results. Hence such parameters 
         // are flagged and error is thrown.
-        if (error*prev_error < 0.0 and std::fabs(error) > m_noise_threshold)
+        if (m_error*prev_error < 0.0 and std::fabs(m_error) > m_noise_threshold)
         {
             m_zeroCrossing_memory = m_gamma*0.2*m_zeroCrossing_memory + 1;
             if (m_zeroCrossing_memory > 10.0)
             {
                 m_zeroCrossing_memory = 0.0;
-                throw std::runtime_error("Too many Zero Crossings Detected");
+                std::cerr<<"Warning! Zero Crossings Detected";
+
+                double delta_error = m_prev_error_max - m_error_max;
+
+                divergence_count_memory = m_gamma*divergence_count_memory*(1.0/delta_error/m_prev_error_max) + (delta_error/m_prev_error_max > 0.0);
+                if (divergence_count_memory > 10.0)
+                {
+                    throw std::runtime_error("Controller is diverging. Session Terminated!");
+                }
             }
 
             m_load = (m_iae > m_iae_limit);
-            m_iae = std::fabs(error)*m_time_step;
+            if(m_load){std::cerr<<"Warning! Load Detected";}
+            
+            // resetting IAE for new supposed load cycle
+            m_iae = std::fabs(m_error)*m_time_step;
 
-            m_error_max = error;
+            // resetting error max for new supposed load cycle
+            m_error_max = std::fabs(m_error);
 
         }  
         else
         {
-            m_error_max = std::max(std::fabs(error), std::fabs(prev_error));
+            m_iae += std::fabs(m_error)*m_time_step;
+            m_load = 0;
+
+            m_error_max = std::max(std::fabs(m_error), std::fabs(prev_error));
         }
         
         /* Oscillation detection*/
@@ -234,9 +311,13 @@ public:
         m_load_memory = m_gamma*m_load_memory + m_load;
         if(m_load_memory > 10.0)
         {
-            f_oscillation_detected = true;
+            oscillation_detected = true;
             m_load_memory = 0.0;
-            throw std::runtime_error("Load Oscillations Detected");
+            std::cerr<<"Warning! Oscillations Detected";
+            
+            if (m_load_memory > 15.0){
+                throw std::runtime_error("Too many oscillations detected. Session Terminated!");
+            }
         }
     }
 };

@@ -55,11 +55,11 @@ int main(void)
     cfg.allow_windup_protection = true;
     cfg.allow_filter = true;
     cfg.filter_const = 1.0;
-    cfg.f_enable_monitoring = true;
+    cfg.f_enable_monitoring = false;
 
 
     // Initializing Controller
-    PidController ctrl(cfg);
+    PIDController ctrl(cfg);
 
     // Declaring System
     System sys(true, 0);

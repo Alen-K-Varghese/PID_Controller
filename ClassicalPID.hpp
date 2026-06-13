@@ -18,6 +18,7 @@
 #include <iostream>
 #include <cassert>
 #include <algorithm>
+#include<cmath>
 #include <vector>
 #include<optional>
 #include<deque>
@@ -385,10 +386,11 @@ struct PIDConfig
     bool allow_windup_protection = true;
     bool allow_filter = true;
     bool f_enable_monitoring = false;
+    bool f_enable_logging = false;
 };
 
 // Class for a classical PID controller.
-class PidController
+class PIDController
 {
 private:
 
@@ -425,7 +427,7 @@ public:
 
     double control_signal = 0.0;
 
-    PidController(
+    PIDController(
         const PIDConfig& config)
         :s_cfg(config)
     { 
@@ -478,24 +480,30 @@ public:
         prev_control_signal = 0.0;
         prev_error = 0.0;
 
-
+        if (s_cfg.f_enable_logging)
+        {
         PID_Log.emplace(s_cfg.iterations);
-        PID_Monitor.emplace(
-            s_cfg.time_step,
-            initial_state,
-            initial_time,
-            s_cfg.kp,
-            s_cfg.ki,
-            s_cfg.kd,
-            s_cfg.u_max,
-            s_cfg.u_min,
-            s_cfg.filter_const
-        );
+        }
+        if (s_cfg.f_enable_monitoring)
+        {
+            std::cout<<"1"<<std::endl;
+            PID_Monitor.emplace(
+                s_cfg.time_step,
+                initial_state,
+                initial_time,
+                s_cfg.kp,
+                s_cfg.ki,
+                s_cfg.kd,
+                s_cfg.u_max,
+                s_cfg.u_min,
+                s_cfg.filter_const);
+        }
     }
 
     void end(void)
     {
-        PID_Monitor.value().ShowResults();
+        std::cout<<"3"<<std::endl;
+        if (s_cfg.f_enable_monitoring) {PID_Monitor.value().ShowResults();}
     }
 
     // Function to compute control signal for given setpoint and state. 
@@ -556,11 +564,14 @@ public:
         control_signal = proportional_term + integral_term + derivative_term;
 
         // Logging data
-        PID_Log.value().log_data(setpoint, error, control_signal, proportional_term, integral_term, derivative_term);
-
+        if (s_cfg.f_enable_logging)
+        {
+            PID_Log.value().log_data(setpoint, error, control_signal, proportional_term, integral_term, derivative_term);
+        }
         // Monitoring of controller performance
         if (s_cfg.f_enable_monitoring)
         {
+            
             PID_Monitor.value().Monitor(
                 setpoint,
                 state,

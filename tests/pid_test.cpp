@@ -10,17 +10,17 @@ constexpr double dt = 1e-2;
 class System
 {
 private:
-    bool allow_noise = false;
+    bool enable_noise = false;
     double delay;
     std::deque<double> delayed_state;
     long unsigned int max_dequeSize = 0;
 
 public:
     System(
-        bool allow_noise,
+        bool enable_noise,
         int delay)
         :
-        allow_noise(allow_noise),
+        enable_noise(enable_noise),
         delay(delay)
         {
             for(int i = 0; i < delay; ++i) delayed_state.push_back(0.0);
@@ -34,7 +34,7 @@ public:
 
         double value = (1 - dt)*delayed_state[0] + dt*controlSignal;
 
-        value += (allow_noise)*0.01*sin(1000*time);
+        value += (enable_noise)*0.01*sin(1000*time);
 
         return value;
     }
@@ -52,17 +52,17 @@ int main(void)
     cfg.u_min = -1.1;   cfg.u_max = 1.1;
     
     cfg.sp_weight = 1.0;
-    cfg.allow_windup_protection = true;
-    cfg.allow_filter = true;
-    cfg.filter_const = 1.0;
-    cfg.f_enable_monitoring = false;
+    cfg.enable_windup_protection = true;
+    cfg.enable_filter = true;
+    cfg.filter_const = 5.0;
+    cfg.enable_monitoring = true;
 
 
     // Initializing Controller
     PIDController ctrl(cfg);
 
     // Declaring System
-    System sys(true, 0);
+    System sys(true, 1);
 
     // Initial Conditions
     double x = 0.0; double u = 0.0;

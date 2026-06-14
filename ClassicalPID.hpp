@@ -80,9 +80,13 @@ private:
 
     // Controller Parameter
     std::deque<double> error_window;
+    unsigned int error_window_size = 10;
     double u_maxValue = 1.0e6;        
     double u_minValue = -1.0e6;
-    unsigned int count_saturation = 0; // Count of instants of saturation at u_max
+    unsigned int count_conditionalSaturation = 0; // Count of instants of saturation at u_max
+    unsigned int count_totalSaturation = 0;
+
+    unsigned int count_setpoint_changes = 1;
 
     double k, td, ti, tt; 
 
@@ -121,6 +125,7 @@ private:
     double gamma = 0.45; // Memory weightage for load history
 
     double load_memory = 0.0; // Memory term for load history
+    double divergence_memory; // Memry term for diverging error signal
 
     double iae = 0.0; // The value of Integral Absolute Error (IAE) in the gap between subsequent zero crossings of error signal.
     double iae_limit = 0.0; // Limit on Integral absolute error for detecting load disturbance.
@@ -132,14 +137,20 @@ private:
     double prev_zero_crossing = 0.0;
 
     // Peak vales of error in previous and current oscillation cycle
-    double prev_error_max = 0.0, m_error_max = 0.0;
+    double prev_error_max = 0.0, error_max = 0.0;
 
     // Band Threshold for distinguishing noise and actual zerocorssings (in percent)
     double noise_threshold = 0.05;
 
+    unsigned int count_zeroCrossing = 0;
+    unsigned int prev_zeroCrossing = 0;
+    double zeroCrossing_memory = 0.0;
+
     bool load = 0;
 
 public:
+
+    bool _tuner_call = false;
 
     PerformanceMonitor(
         const double& time_step,
@@ -218,6 +229,7 @@ public:
             y90_recorded = false;
             peakValue_recorded = false;
             steadyState_reached = false;
+            ++count_setpoint_changes;
 
             error_window.clear();
         }
@@ -242,24 +254,24 @@ public:
         }
 
         error_window.push_back(std::fabs(error));
-        if(error_window.size() > 5)
+        if(error_window.size() > error_window_size)
         {
             error_window.pop_front();
 
             if(!steadyState_reached)
             {
                 double sum_err = 0.0;
-                for(int i = 0; i < 5; i++) sum_err += error_window.at(i);
+                for(unsigned int i = 0; i < error_window_size; i++) sum_err += error_window.at(i);
 
                 // Error must be with 5% or reference vales for 
-                if (sum_err/(5*setpoint) <= 0.05)
+                if (sum_err/(error_window_size*setpoint) <= 0.05)
                 {
                     steadyState_reached = true;
                     peakValue_recorded = true;
 
-                    overshootValue_arr.push_back(peak_value/setpoint);
-                    overshootTime_arr.push_back(peak_value_time);
-                    settlingTime_arr.push_back((count_call - 5)*time_step);
+                    overshootValue_arr.push_back(((peak_value - setpoint) > 0)*setpoint);
+                    overshootTime_arr.push_back(((peak_value - setpoint) > 0)*peak_value_time);
+                    settlingTime_arr.push_back((count_call - error_window_size)*time_step);
                 }
             }
         }
@@ -269,12 +281,15 @@ public:
         // If it exceeds 5% in upper of loweer bound, its warns user.
         // Only starts monitoring after 20-30 of operation to 
         // avoid false positives during setpoint changes and initial transients.
-        count_saturation += (control_signal <= u_minValue) or (control_signal >= u_maxValue);
+        int sat = (control_signal <= u_minValue + 1e-2 * u_minValue) or (control_signal >= u_maxValue - 1e-2 * u_maxValue);
+        count_totalSaturation += sat;
+        count_conditionalSaturation += sat;
 
-        if ((count_call > 1.0/time_step) and (count_saturation > 0.1*count_call))
+
+        if ((count_call > 1.0/time_step) and (count_conditionalSaturation > 0.1*count_call))
         {   
-            std::cerr<<"\n Warning! Saturation Detected \n "<<std::endl; 
-            count_saturation = 0;
+            if(!_tuner_call){std::cerr<<"\n Warning! Saturation Detected \n "<<std::endl;}
+            count_conditionalSaturation = 0;
         }
 
 
@@ -292,28 +307,48 @@ public:
         // and is best set based on the expected load disturbances in the system. 
         //
         // During the event of a setpoint change, certain values are reset to avoid false positives.
-        // 
-        // Certain constants like omega_u (ultimate frequency) are estimated using parameters of corrosponding 
-        // PidController. So highly imporper tuning can generate erratic results. Hence such parameters 
-        // are flagged and error is thrown.
         if (error*prev_error < 0.0 and std::fabs(error) > noise_threshold)
         {
+            ++count_zeroCrossing;
+            zeroCrossing_memory *= (0.5/(count_call - prev_zero_crossing));
+
             load = (iae > iae_limit);
-            if(load){std::cerr<<"Warning! Load Detected";}
+            if(load and !_tuner_call){std::cerr<<"Warning! Load Detected";}
             
             // resetting IAE for new supposed load cycle
             iae = std::fabs(error)*time_step;
 
             // resetting error max for new supposed load cycle
-            m_error_max = std::fabs(error);
+            error_max = std::fabs(error);
 
+            double delta_error_peak_normalized = 1 - std::fabs(error_max/prev_error_max);
+
+            // Consecutive error peaks are to drop by atlest 10% else its seen as sustaned.
+            // If error peaks increase, to absolved loads from computation a weighted sum is added. if it exceeds 5 
+            // runtime error is thrown for a diverging controller. This is outside of load detection behavior, which require 
+            // the IAE of error to be higher than some threshold.
+            if (delta_error_peak_normalized < 0.10)
+            {
+                divergence_memory *= (0.5/(count_call - prev_zero_crossing));
+                divergence_memory += (delta_error_peak_normalized < 0.0);
+                if(!_tuner_call and divergence_memory > 5)
+                {
+                    throw std::runtime_error("Controller is diverging");
+                }
+
+
+                if(!_tuner_call){std::cout<<"Warning! Sustained Oscillations Detected";}
+            }
+
+            prev_error_max = error_max;
+            prev_zero_crossing = count_call;
         }  
         else
         {
             iae += std::fabs(error)*time_step;
             load = 0;
 
-            m_error_max = std::max(std::fabs(error), std::fabs(prev_error));
+            error_max = std::max(std::fabs(error), std::fabs(prev_error));
         }
         
         /* Oscillation detection*/
@@ -323,36 +358,78 @@ public:
         load_memory = gamma*load_memory + load;
         if(load_memory > 5.0)
         {
-            if (load_memory > 15.0)
+            if (!_tuner_call and load_memory > 15.0 )
             {
                 throw std::runtime_error("Too many oscillations detected. Session Terminated!");
             }
 
             load_memory = 0.0;
-            std::cerr<<"Warning! Oscillations Detected";
+            if(!_tuner_call){std::cerr<<"Warning! Oscillations Detected";}
         }
+
+        prev_error = error;
     }
 
+    double _computePerformanceMatrices()
+    {
+        assert(_tuner_call);
+        return (rise_time_arr.at(0) * 10) + (overshootValue_arr.at(0) * 1000) + (settlingTime_arr.at(0)*10);
+    }
     void ShowResults(void)
     {
         std::cout<<"======================================================="<<std::endl;
         std::cout<<"\t \t Performance Analysis"<< std::endl;
         std::cout<<"======================================================="<<std::endl;
 
-        for(unsigned long int i = 0; i < rise_time_arr.size(); ++i)
+        for(unsigned long int i = 0; i < count_setpoint_changes; ++i)
         {
+            // Setpoint Changes in the system
             std::cout<<"Setpoint change  #"<<i+1<<std::endl;
 
-            std::cout<<"Rise Time       "<< rise_time_arr.at(i)<<" sec"<<std::endl;
+            // Rise Time
+            try
+            {
+                std::cout<<"Rise Time       "<< rise_time_arr.at(i)<<" sec"<<std::endl;
+            }
+            catch(std::exception& e)
+            {
+                std::cout<<"Rise Time       "<<" - "<<std::endl;
+            }
+            
+            // Overshoot Time
+            try
+            {
+                std::cout<<"Overshoot       "<<overshootValue_arr.at(i)*100<<" % \t"<<"at "<<overshootTime_arr.at(i)<< " sec"<<std::endl;
+            }
+            catch(std::exception& e)
+            {
+                std::cout<<"Overshoot       "<<" - "<<std::endl;
+            }
 
-            std::cout<<"Overshoot       "<<overshootValue_arr.at(i)<<" % \t"<<
-                "at "<<overshootTime_arr.at(i)<< " sec"<<std::endl;
+            // Settling Time
+            try
+            {
+                std::cout<<"Settling Time:  "<<settlingTime_arr.at(i)<< " sec"<<std::endl;
+            }
+            catch(std::exception& e)
+            {
+                std::cout<<"Settling Time:  "<< " - "<<std::endl;
+            }
 
-            std::cout<<"Settling Time:  "<<settlingTime_arr.at(i)<< " sec"<<std::endl;
+            double zeroCrossing_percent = count_zeroCrossing * 100 /count_call;
+            std::cout<<"Zero Crossings: "<<zeroCrossing_percent<<" %";
+            if(zeroCrossing_percent < 1){std::cout<<" -> good"<<std::endl;}
+            else if(zeroCrossing_percent < 5){std::cout<<" -> average"<<std::endl;}
+            else{std::cout<<" -> bad"<<std::endl;}
+
+            double saturation_percent = count_totalSaturation * 100 /count_call;
+            std::cout<<"Saturation:     "<<saturation_percent<<" %";
+            if(saturation_percent < 1){std::cout<<" -> good"<<std::endl;}
+            else if(saturation_percent < 5){std::cout<<" -> average"<<std::endl;}
+            else{std::cout<<" -> bad"<<std::endl;}
+            
         }
     }
-
-
 };
 
 
@@ -383,10 +460,12 @@ struct PIDConfig
 
     int iterations = 500;
 
-    bool allow_windup_protection = true;
-    bool allow_filter = true;
+    bool enable_windup_protection = true;
+    bool enable_filter = true;
     bool f_enable_monitoring = false;
     bool f_enable_logging = false;
+
+    bool _tuner_call = false;
 };
 
 // Class for a classical PID controller.
@@ -480,13 +559,13 @@ public:
         prev_control_signal = 0.0;
         prev_error = 0.0;
 
-        if (s_cfg.f_enable_logging)
+        if (s_cfg.f_enable_logging and !s_cfg._tuner_call)
         {
         PID_Log.emplace(s_cfg.iterations);
         }
-        if (s_cfg.f_enable_monitoring)
+
+        if (s_cfg.f_enable_monitoring or s_cfg._tuner_call)
         {
-            std::cout<<"1"<<std::endl;
             PID_Monitor.emplace(
                 s_cfg.time_step,
                 initial_state,
@@ -497,13 +576,20 @@ public:
                 s_cfg.u_max,
                 s_cfg.u_min,
                 s_cfg.filter_const);
+                
+            PID_Monitor.value()._tuner_call = s_cfg._tuner_call;
         }
     }
 
     void end(void)
     {
-        std::cout<<"3"<<std::endl;
-        if (s_cfg.f_enable_monitoring) {PID_Monitor.value().ShowResults();}
+        if (!s_cfg._tuner_call and s_cfg.f_enable_monitoring) {PID_Monitor.value().ShowResults();}
+    }
+
+    double _returnPerformanceMatrices(void)
+    {
+        assert(s_cfg._tuner_call);
+        return PID_Monitor.value()._computePerformanceMatrices();
     }
 
     // Function to compute control signal for given setpoint and state. 
@@ -537,7 +623,7 @@ public:
         {
             /*Weights for Tustins Method*/
             double a1 = 0.0, a2 = k*td/h;
-            if(s_cfg.allow_filter)
+            if(s_cfg.enable_filter)
             {
                 /*First order Filter*/
                 
@@ -551,7 +637,7 @@ public:
         if (f_intgr)
         {   
             integral_term = integral_term + (k*h*0.5/ti)*(error + prev_error);
-            if (s_cfg.allow_windup_protection)
+            if (s_cfg.enable_windup_protection)
             {
                 const double u_pred = proportional_term + integral_term + derivative_term;
 
@@ -564,12 +650,12 @@ public:
         control_signal = proportional_term + integral_term + derivative_term;
 
         // Logging data
-        if (s_cfg.f_enable_logging)
+        if (s_cfg.f_enable_logging and !s_cfg._tuner_call)
         {
             PID_Log.value().log_data(setpoint, error, control_signal, proportional_term, integral_term, derivative_term);
         }
         // Monitoring of controller performance
-        if (s_cfg.f_enable_monitoring)
+        if (s_cfg.f_enable_monitoring or s_cfg._tuner_call)
         {
             
             PID_Monitor.value().Monitor(

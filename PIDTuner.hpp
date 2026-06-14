@@ -17,6 +17,12 @@
 std::mt19937 rng(std::random_device{}());
 std::uniform_real_distribution<double> dist(0.0, 1.0);
 
+struct candidate_solution
+{
+    std::array<double, 4> candiate_vector;
+    double associated_cost;
+};
+
 
 struct time_span
 {
@@ -29,7 +35,7 @@ class PIDTuner
 {
 private:
     // Best Solution Candidates
-    std::array<double, 4> alpha_candidate, bate_candidate, delta_candidate;
+    candidate_solution alpha_candidate, beta_candidate, delta_candidate;
 
     // Random Parameter vactors
     std::array<double, 4> rand_vec_r1, rand_vec_r2;
@@ -57,7 +63,7 @@ private:
     // Bounds on Parameters 
     std::array<double, 4> upper_bound, lower_bound;
 
-    std::vector<std::array<double,5>> initial_candidate_arr;
+    std::vector<candidate_solution> initial_candidate_arr;
 
     std::array<double, 4> random_vector()
     {
@@ -70,23 +76,21 @@ private:
         return rand_vector;
     }
 
-    double fitness_measure(
-        const double kp,
-        const double kd,
-        const double ki,
-        const double sp_weight)
+    double fitness_measure(std::array<double, 4> candidate)
     {
         PIDConfig config = cfg;
-        config.kp = kp;
-        config.ki = ki;
-        config.kd = kd;
-        config.sp_weight = sp_weight;
-        config.f_enable_monitoring = false;
-        config.f_enable_logging = false;
+        config.kp = candidate[0];
+        config.ki = candidate[1];
+        config.kd = candidate[2];
+        config.sp_weight = candidate[3];
+        config.enable_monitoring = false;
+        config.enable_logging = false;
+
+        config._tuner_call = true;
 
         PIDController ctrl(config);
 
-        double ITAE = 0.0;
+        
       
         double i = tspan.initial_time;
         double tf = tspan.final_time;
@@ -97,7 +101,12 @@ private:
         double state = initial_state;
         double control_signal = initial_control;
 
-        // ctrl.begin(0.0, 0.0);
+        ctrl.begin(state, control_signal);
+
+        // Penalty or cost of the system
+        double ITAE = 0.0;
+        double overshoot_penalty = 0.0;
+        double total_penalty = 0.0;
 
         while(i <= tf)
         {
@@ -107,11 +116,15 @@ private:
             control_signal =  ctrl.computeControlSignal(setpoint, state);
 
             // ITAE
-            ITAE += dt*std::fabs(error)*i + (state > setpoint)*100;
+            ITAE += dt*std::fabs(error)*i;
+
+            // Penalty imposed for overshoot
+            overshoot_penalty += (state > setpoint)*25;
 
             i+=dt;
         }
-        // ctrl.end();
+        total_penalty = ITAE + overshoot_penalty + ctrl._returnPerformanceMatrices();
+        
         return ITAE;
     }
 
@@ -123,7 +136,7 @@ public:
         const double& setpoint,
         const time_span tspan,
         const PIDConfig& controller_config, 
-        const unsigned short int& number_of_agents,
+        const unsigned short int& number_of_initial_candidates,
         const unsigned short int& max_iterations,
         const std::array<double, 4>& upper_bound, 
         const std::array<double, 4>& lower_bound)
@@ -134,46 +147,55 @@ public:
     setpoint(setpoint),
     tspan(tspan),
     cfg(controller_config),
-    initial_candidates(number_of_agents),
+    initial_candidates(number_of_initial_candidates),
     max_iterations(max_iterations),
     upper_bound(upper_bound), 
     lower_bound(lower_bound),
-    initial_candidate_arr(number_of_agents)
+    initial_candidate_arr(number_of_initial_candidates)
     {
+        // At leat 3 initial candidates for alpha, beta and delta. the more the better
+        assert(number_of_initial_candidates >= 3);
+
+        // there should be at least 1 iteration and max allowed iterations = 1e6
+        assert((max_iterations > 1) and (max_iterations < 1e6));
+
         assert((upper_bound[0] >= lower_bound[0]) and (lower_bound[0] >= 0));
         assert((upper_bound[1] >= lower_bound[1]) and (lower_bound[1] >= 0));
         assert((upper_bound[2] >= lower_bound[2]) and (lower_bound[2] >= 0));
         assert((upper_bound[3] >= lower_bound[3]) and (lower_bound[3] >= 0)  and (upper_bound[3] <= 1));
+    }
 
-        
+    void initialize(void)
+    {
         for (int i = 0; i < initial_candidates; i++)
         {
             // Initialization of array for random initial guesses
-            initial_candidate_arr[i][0] = lower_bound[0] + dist(rng)*(upper_bound[0] - lower_bound[0]);
-            initial_candidate_arr[i][1] = lower_bound[1] + dist(rng)*(upper_bound[1] - lower_bound[1]);
-            initial_candidate_arr[i][2] = lower_bound[2] + dist(rng)*(upper_bound[2] - lower_bound[2]);
-            initial_candidate_arr[i][3] = lower_bound[3] + dist(rng)*(upper_bound[3] - lower_bound[3]);
+            initial_candidate_arr[i].candiate_vector[0] = lower_bound[0] + dist(rng)*(upper_bound[0] - lower_bound[0]);
+            initial_candidate_arr[i].candiate_vector[1] = lower_bound[1] + dist(rng)*(upper_bound[1] - lower_bound[1]);
+            initial_candidate_arr[i].candiate_vector[2] = lower_bound[2] + dist(rng)*(upper_bound[2] - lower_bound[2]);
+            initial_candidate_arr[i].candiate_vector[3] = lower_bound[3] + dist(rng)*(upper_bound[3] - lower_bound[3]);
 
             // Finding the cost of these candidate values
-            initial_candidate_arr[i][4] = fitness_measure(
-                                            initial_candidate_arr[i][0], initial_candidate_arr[i][1], 
-                                            initial_candidate_arr[i][2], initial_candidate_arr[i][3]);
+            initial_candidate_arr[i].associated_cost = fitness_measure(initial_candidate_arr[i].candiate_vector);
         }
 
-        // Sorting the array as the cost as pivot. The 1st three vales are respectively alpha, beta and delta candidates
+        // Sorting the array with cost as pivot. The 1st three vales are respectively alpha, beta and delta candidates
         for(int i = 1; i < initial_candidates; i++)
         {
-            std::array<double, 5> key = initial_candidate_arr[i];
+            candidate_solution key = initial_candidate_arr[i];
             int j = i - 1;
 
-            while((j >= 0) and (initial_candidate_arr[j][4] > key[4]))
+            while((j >= 0) and (initial_candidate_arr[j].associated_cost > key.associated_cost))
             {
                 initial_candidate_arr[j + 1] = initial_candidate_arr[j];
                 --j;
             }
             initial_candidate_arr[j + 1] = key;
         }
-        
+
+        alpha_candidate = initial_candidate_arr[0];
+        beta_candidate = initial_candidate_arr[1];
+        delta_candidate = initial_candidate_arr[2];
     }
 
 

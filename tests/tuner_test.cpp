@@ -29,15 +29,17 @@ int main(void)
     cfg.u_min = -1.1;   cfg.u_max = 1.1;
     
     cfg.sp_weight = 1.0;
-    cfg.allow_windup_protection = true;
-    cfg.allow_filter = true;
+    cfg.enable_windup_protection = true;
+    cfg.enable_filter = true;
     cfg.filter_const = 1.0;
-    cfg.f_enable_monitoring = true;
-
+    cfg.enable_monitoring = true;
+;
     PIDTuner tuner(
         Sys,
         0.0, 0.0, 1.0, 
-        tspan, cfg, 5, 2, ub, lb);
+        tspan, cfg, 50, 2, ub, lb);
+    tuner.initialize();
+    tuner.optimize();
 
     return 0;
 }

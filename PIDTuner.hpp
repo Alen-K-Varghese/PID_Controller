@@ -17,11 +17,122 @@
 std::mt19937 rng(std::random_device{}());
 std::uniform_real_distribution<double> dist(0.0, 1.0);
 
-struct candidate_solution
+class _vec4
 {
-    std::array<double, 4> candiate_vector;
-    double associated_cost;
+public:
+    std::array<double, 4> vector;
+
+    const double& operator[](const int& a) const
+    {
+        return vector[a];
+    }
+
+    _vec4 operator+(const _vec4& other) const
+    {
+        _vec4 result;
+
+        result[0] = vector[0] + other.vector[0];
+        result[1] = vector[1] + other.vector[1];
+        result[2] = vector[2] + other.vector[2];
+        result[3] = vector[3] + other.vector[3];
+
+        return result;
+    }
+
+    _vec4 operator+(const double other) const
+    {
+        _vec4 result;
+
+        result[0] = vector[0] + other;
+        result[1] = vector[1] + other;
+        result[2] = vector[2] + other;
+        result[3] = vector[3] + other;
+
+        return result;
+    }
+
+    _vec4 operator-(const _vec4& other) const
+    {
+        _vec4 result;
+
+        result[0] = vector[0] - other.vector[0];
+        result[1] = vector[1] - other.vector[1];
+        result[2] = vector[2] - other.vector[2];
+        result[3] = vector[3] - other.vector[3];
+
+        return result;
+    }
+
+    _vec4 operator-(const double other) const
+    {
+        _vec4 result;
+
+        result[0] = vector[0] - other;
+        result[1] = vector[1] - other;
+        result[2] = vector[2] - other;
+        result[3] = vector[3] - other;
+
+        return result;
+    }
+
+    _vec4 operator*(const _vec4& other) const
+    {
+        _vec4 result;
+
+        result[0] = vector[0] * other.vector[0];
+        result[1] = vector[1] * other.vector[1];
+        result[2] = vector[2] * other.vector[2];
+        result[3] = vector[3] * other.vector[3];
+
+        return result;
+    }
+
+    _vec4 operator*(const double other) const
+    {
+        _vec4 result;
+
+        result[0] = vector[0] * other;
+        result[1] = vector[1] * other;
+        result[2] = vector[2] * other;
+        result[3] = vector[3] * other;
+
+        return result;
+    }
+
+    double& operator[](const int& a)
+    {
+        return vector[a];
+    }
+
+    _vec4 abs()
+    {
+        _vec4 result;
+
+        result[0] = std::fabs(vector[0]);
+        result[1] = std::fabs(vector[1]);
+        result[2] = std::fabs(vector[2]);
+        result[3] = std::fabs(vector[3]);
+
+        return result;
+    }
+
 };
+
+struct _candidateSolution
+{
+    _vec4 candiate_vector;
+    double associated_cost = 1.0e8;
+};
+
+std::ostream& operator<<(std::ostream& out, const _candidateSolution& sol)
+{
+    return out << "\n kp =   "<< sol.candiate_vector[0]
+               << "\n ki =   "<< sol.candiate_vector[1]
+               << "\n kd =   "<< sol.candiate_vector[2]
+               << "\n sp_weight =   "<< sol.candiate_vector[3]
+               << "\n assosiated cost =   "<< sol.associated_cost
+               <<std::endl;
+}
 
 
 struct time_span
@@ -35,13 +146,7 @@ class PIDTuner
 {
 private:
     // Best Solution Candidates
-    candidate_solution alpha_candidate, beta_candidate, delta_candidate;
-
-    // Random Parameter vactors
-    std::array<double, 4> rand_vec_r1, rand_vec_r2;
-
-    // Vector of Parameters
-    std::array<double, 4> vec_C, vec_A; 
+    _candidateSolution best_candidate[3];
 
     // The system to be controler as a system in the form x[n+1] = f(t[n], x[n], u[n])
     std::function<double(double, double, double)> system;
@@ -63,11 +168,11 @@ private:
     // Bounds on Parameters 
     std::array<double, 4> upper_bound, lower_bound;
 
-    std::vector<candidate_solution> initial_candidate_arr;
+    std::vector<_candidateSolution> initial_candidate_arr;
 
-    std::array<double, 4> random_vector()
+    _vec4 random_vector()
     {
-        std::array<double, 4> rand_vector;
+        _vec4 rand_vector;
         rand_vector[0] = dist(rng);
         rand_vector[1] = dist(rng);
         rand_vector[2] = dist(rng);
@@ -76,7 +181,29 @@ private:
         return rand_vector;
     }
 
-    double fitness_measure(std::array<double, 4> candidate)
+    void shuffleCandidates(const _candidateSolution candidate)
+    {
+        if(candidate.associated_cost < best_candidate[0].associated_cost)
+        {
+            best_candidate[2] = best_candidate[1];
+            best_candidate[1] = best_candidate[0];
+            best_candidate[0] = candidate;
+        }
+
+        else if(candidate.associated_cost < best_candidate[1].associated_cost)
+        {
+            best_candidate[2] = best_candidate[1];
+            best_candidate[1] = candidate;
+        }
+
+        else if (candidate.associated_cost < best_candidate[2].associated_cost)
+        {
+            best_candidate[2] = candidate;
+        }
+        else {}
+    }
+
+    double fitness_measure(const _vec4& candidate)
     {
         PIDConfig config = cfg;
         config.kp = candidate[0];
@@ -90,8 +217,6 @@ private:
 
         PIDController ctrl(config);
 
-        
-      
         double i = tspan.initial_time;
         double tf = tspan.final_time;
         double dt = tspan.time_step; 
@@ -125,7 +250,7 @@ private:
         }
         total_penalty = ITAE + overshoot_penalty + ctrl._returnPerformanceMatrices();
         
-        return ITAE;
+        return total_penalty;
     }
 
 public:
@@ -177,25 +302,54 @@ public:
 
             // Finding the cost of these candidate values
             initial_candidate_arr[i].associated_cost = fitness_measure(initial_candidate_arr[i].candiate_vector);
+
+            std::cout<<initial_candidate_arr[i].associated_cost<<std::endl;
         }
 
-        // Sorting the array with cost as pivot. The 1st three vales are respectively alpha, beta and delta candidates
-        for(int i = 1; i < initial_candidates; i++)
+        // best_candidate[0] = initial_candidate_arr[0];
+        for(int i = 0; i < initial_candidates; i++)
         {
-            candidate_solution key = initial_candidate_arr[i];
-            int j = i - 1;
-
-            while((j >= 0) and (initial_candidate_arr[j].associated_cost > key.associated_cost))
-            {
-                initial_candidate_arr[j + 1] = initial_candidate_arr[j];
-                --j;
-            }
-            initial_candidate_arr[j + 1] = key;
+            shuffleCandidates(initial_candidate_arr[i]);
+            std::cout<<"\n"<<best_candidate[0].associated_cost;
         }
 
-        alpha_candidate = initial_candidate_arr[0];
-        beta_candidate = initial_candidate_arr[1];
-        delta_candidate = initial_candidate_arr[2];
+    }
+
+    void optimize()
+    {
+        double a = 2;
+        double delta_a = 2.0/max_iterations;
+
+        for(int i = 0; i < max_iterations; i++)
+        {
+            for(int j = 0; j < initial_candidates; j++)
+            {
+                _candidateSolution X, Xi[3];
+
+                for(int k = 0; k < 3; k++)
+                {
+                    _vec4 vec_A, vec_C, vec_D;
+
+                    _vec4 vec_r1 = random_vector();
+                    _vec4 vec_r2 = random_vector();
+
+                    vec_A = (vec_r1 * 2*a) - a;
+                    vec_C = vec_r2*a;
+
+                    vec_D = ((vec_C * best_candidate[k].candiate_vector) - initial_candidate_arr[j].candiate_vector).abs();
+                    
+                    Xi[k].candiate_vector = best_candidate[k].candiate_vector - (vec_A*vec_D);
+                }
+                X.candiate_vector = (Xi[0].candiate_vector + Xi[1].candiate_vector + Xi[2].candiate_vector)*(1/3);
+
+                X.associated_cost = fitness_measure(X.candiate_vector);
+
+                shuffleCandidates(X);
+            }
+            a -= delta_a;
+        }
+
+        std::cout<<best_candidate[0];
     }
 
 

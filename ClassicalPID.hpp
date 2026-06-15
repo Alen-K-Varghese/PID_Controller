@@ -176,21 +176,22 @@ public:
         const double& ki, 
         const double& kd)
         {
-            assert(kp > 0.0);
-            k = kp;
+            assert(kp >= 0.0);
+            k = std::clamp(kp, 1e-6, 1e2);
 
-            assert(ki > 0.0);
-            ti = k/ki;
+            assert(ki >= 0.0);
+            ti = std::clamp(k/ki, 1e-6, 1e2);
 
             gamma = 1.0 - (50*ti)/time_step;
             omega_ult = (2.0*g_pi)/ti;
             iae_limit = (2.0*oscillation_amplitude)/omega_ult;
 
             tt = ti;
-            if (kd > 0.0)
+            if (kd >= 0.0)
             {
-                td = kd/k;
-                tt = std::sqrt(ti*td);
+                td = std::clamp(kd/k, 1e-6, 1e2);
+                tt = std::clamp(std::sqrt(ti*td), 1e-6, 1e2);
+                
             }
         }
 
@@ -312,8 +313,18 @@ public:
             ++count_zeroCrossing;
             zeroCrossing_memory *= (0.5/(count_call - prev_zero_crossing));
 
+            if(zeroCrossing_memory > 5 and !_tuner_call)
+            {
+                if (zeroCrossing_memory > 10)
+                {
+                    throw std::runtime_error("Too many Zero Crossings detected");
+                }
+                
+                std::cerr<<"Warning! Too many zero crossings detected";
+            }
+
             load = (iae > iae_limit);
-            if(load and !_tuner_call){std::cerr<<"Warning! Load Detected";}
+            if(load and !_tuner_call){std::cerr<<"Warning! Load Detected"<<std::endl;}
             
             // resetting IAE for new supposed load cycle
             iae = std::fabs(error)*time_step;
@@ -337,7 +348,7 @@ public:
                 }
 
 
-                if(!_tuner_call){std::cout<<"Warning! Sustained Oscillations Detected";}
+                if(!_tuner_call){std::cerr<<"Warning! Sustained Oscillations Detected"<<std::endl;}
             }
 
             prev_error_max = error_max;
@@ -373,7 +384,38 @@ public:
     double _computePerformanceMatrices()
     {
         assert(_tuner_call);
-        return (rise_time_arr.at(0) * 10) + (overshootValue_arr.at(0) * 1000) + (settlingTime_arr.at(0)*10);
+        double overshoot_penalty = 0.0, rise_time_penalty = 0.0, settling_time_penalty = 0.0;
+        try
+        {
+            overshoot_penalty = (overshootValue_arr.at(0) * 1000);
+        }
+        catch(const std::exception& e)
+        {
+            overshoot_penalty = 0.0;
+        }
+
+        try
+        {
+           rise_time_penalty = (rise_time_arr.at(0) * 10);
+        }
+        catch(const std::exception& e)
+        {
+            rise_time_penalty = 2000.0;
+        }
+        
+        try
+        {
+            settling_time_penalty = (settlingTime_arr.at(0)*10);
+        }
+        catch(const std::exception& e)
+        {
+            settling_time_penalty = 2000.0;
+        }
+        
+        
+        return overshoot_penalty + rise_time_penalty + settling_time_penalty 
+                   + (count_totalSaturation/count_call > 0.01)*25.0 
+                   + (count_zeroCrossing/count_call > 0.01)*25.0;
     }
     void ShowResults(void)
     {
@@ -442,8 +484,8 @@ public:
 // @param allowWindupProtection : To allow of disallow Integral Windup Protection using Back-Calculation. Defaults to false
 // @param allowFilter : To allow or disallow Filetr for derivative term
 // @param filterConst : Constant for derivative filter. Typically between 7 and 20.
-// @param f_enabelLogging : To allow or disallow Logging of data, allowing logging, plotting and convert_to_csv. Defaults to false. See: Logger
-// @param f_enableMonitoring : To allow or disallow Closed Loop Performance Monitoring. Defaults to false. See: PerformanceMonitor.
+// @param enabelLogging : To allow or disallow Logging of data, allowing logging, plotting and convert_to_csv. Defaults to false. See: Logger
+// @param enableMonitoring : To allow or disallow Closed Loop Performance Monitoring. Defaults to false. See: PerformanceMonitor.
 struct PIDConfig
 {
     double kp;
@@ -462,8 +504,8 @@ struct PIDConfig
 
     bool enable_windup_protection = true;
     bool enable_filter = true;
-    bool f_enable_monitoring = false;
-    bool f_enable_logging = false;
+    bool enable_monitoring = false;
+    bool enable_logging = false;
 
     bool _tuner_call = false;
 };
@@ -481,7 +523,7 @@ private:
     double prev_state = 0.0, prev_control_signal = 0.0, prev_error = 0.0;
 
     // Internal Flag
-    bool f_sp_weight = false, f_deriv = false, f_intgr = false;
+    bool sp_weight = false, deriv = false, intgr = false;
 
     std::optional<Logger> PID_Log;
     std::optional<PerformanceMonitor> PID_Monitor;
@@ -490,8 +532,8 @@ private:
     {
         assert(s_cfg.time_step > 0.0);
         assert(s_cfg.u_max - s_cfg.u_min > 0.0);
-        assert(s_cfg.sp_weight>0.0 && s_cfg.sp_weight <= 1.0);
-        f_sp_weight = true;
+        assert(s_cfg.sp_weight>=0.0 && s_cfg.sp_weight <= 1.0);
+        sp_weight = true;
 
     };
 
@@ -502,6 +544,9 @@ public:
     double td = 0.0;
     double tt = 0.0;
 
+    double N;
+    double h;
+
     PIDConfig s_cfg;
 
     double control_signal = 0.0;
@@ -510,8 +555,11 @@ public:
         const PIDConfig& config)
         :s_cfg(config)
     { 
+        
         validateConfig();
         setGains(config.kp, config.ki, config.kd);
+        h = s_cfg.time_step;
+        N = s_cfg.filter_const;
     }
     
     // sets gains of the controller and updates internal variables accordingly.
@@ -526,23 +574,23 @@ public:
         const double& ki,
         const double& kd)
     {
-        assert(kp >0.0);  k = kp;
+        assert(kp >= 0.0);  k = std::max(kp, 1e-6);
 
-        f_deriv = false;
+        deriv = false;
         if (kd > 0.0)
         {
-            f_deriv = true;  
+            deriv = true;  
             td = kd/k;
         }
 
-        f_intgr = false;
+        intgr = false;
         if(ki > 0.0)
         {
-            f_intgr = true;  
+            intgr = true;  
             ti = k/ki;
 
             tt = ti;
-            if (f_deriv){tt = std::sqrt(ti*td);}
+            if (deriv){tt = std::sqrt(ti*td);}
         }
     }
 
@@ -559,12 +607,12 @@ public:
         prev_control_signal = 0.0;
         prev_error = 0.0;
 
-        if (s_cfg.f_enable_logging and !s_cfg._tuner_call)
+        if (s_cfg.enable_logging and !s_cfg._tuner_call)
         {
         PID_Log.emplace(s_cfg.iterations);
         }
 
-        if (s_cfg.f_enable_monitoring or s_cfg._tuner_call)
+        if (s_cfg.enable_monitoring or s_cfg._tuner_call)
         {
             PID_Monitor.emplace(
                 s_cfg.time_step,
@@ -583,7 +631,7 @@ public:
 
     void end(void)
     {
-        if (!s_cfg._tuner_call and s_cfg.f_enable_monitoring) {PID_Monitor.value().ShowResults();}
+        if (!s_cfg._tuner_call and s_cfg.enable_monitoring) {PID_Monitor.value().ShowResults();}
     }
 
     double _returnPerformanceMatrices(void)
@@ -606,20 +654,16 @@ public:
         const double& setpoint,
         const double& state)
     {
-        const double N = s_cfg.filter_const;
-
-        const double h = s_cfg.time_step;    /*Time Step*/
-
         const double error = setpoint - state;
 
         double error_pTerm = error;
-        if (f_sp_weight){error_pTerm = s_cfg.sp_weight*setpoint - state;}
+        if (sp_weight){error_pTerm = s_cfg.sp_weight*setpoint - state;}
 
         /*Proportional Term*/
         proportional_term = k*error_pTerm;
 
         /*Derivative Term*/
-        if (f_deriv)
+        if (deriv)
         {
             /*Weights for Tustins Method*/
             double a1 = 0.0, a2 = k*td/h;
@@ -634,9 +678,9 @@ public:
         }
         
         /*Integral Term*/
-        if (f_intgr)
+        if (intgr)
         {   
-            integral_term = integral_term + (k*h*0.5/ti)*(error + prev_error);
+            integral_term += (k*h*0.5/ti)*(error + prev_error);
             if (s_cfg.enable_windup_protection)
             {
                 const double u_pred = proportional_term + integral_term + derivative_term;
@@ -650,12 +694,12 @@ public:
         control_signal = proportional_term + integral_term + derivative_term;
 
         // Logging data
-        if (s_cfg.f_enable_logging and !s_cfg._tuner_call)
+        if (s_cfg.enable_logging and !s_cfg._tuner_call)
         {
             PID_Log.value().log_data(setpoint, error, control_signal, proportional_term, integral_term, derivative_term);
         }
         // Monitoring of controller performance
-        if (s_cfg.f_enable_monitoring or s_cfg._tuner_call)
+        if (s_cfg.enable_monitoring or s_cfg._tuner_call)
         {
             
             PID_Monitor.value().Monitor(

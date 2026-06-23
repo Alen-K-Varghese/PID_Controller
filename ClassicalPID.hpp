@@ -180,19 +180,12 @@ public:
             k = std::clamp(kp, 1e-6, 1e2);
 
             assert(ki >= 0.0);
+            double _ki = std::clamp(ki, 1e-6, 1e2);
             ti = std::clamp(k/ki, 1e-6, 1e2);
 
             gamma = 1.0 - (50*ti)/time_step;
             omega_ult = (2.0*g_pi)/ti;
             iae_limit = (2.0*oscillation_amplitude)/omega_ult;
-
-            tt = ti;
-            if (kd >= 0.0)
-            {
-                td = std::clamp(kd/k, 1e-6, 1e2);
-                tt = std::clamp(std::sqrt(ti*td), 1e-6, 1e2);
-                
-            }
         }
 
     void setActuatorLimits(
